@@ -332,6 +332,16 @@ static void on_bmw_log(struct mosquitto* /*mosq*/, void* /*userdata*/,
         g_last_connect_attempt = time(nullptr);
     }
 
+    if (std::strstr(str, "OpenSSL Error")
+        || std::strstr(str, "SSL")
+        || std::strstr(str, "unexpected eof"))
+    {
+        g_connected = false;
+        publish_status(false);
+        long now = time(nullptr);
+        g_next_connect_after = now + 5 + (jitter_ms(0)/1000);
+    }
+
     std::cerr << "[bmw/log] level=" << level << " " << str << "\n";
 }
 
@@ -482,8 +492,16 @@ int main(){
                 last_successful_refresh= now;
 
                 mosquitto_username_pw_set(g_bmw, GCID.c_str(), g_id_token.c_str());
+
+                g_connected = false;
+                publish_status(false);
+                mosquitto_disconnect(g_bmw);
+
+                std::this_thread::sleep_for(std::chrono::milliseconds(200 + (rng() % 300)));
+
                 if (time(nullptr) >= g_next_connect_after.load()) {
                     int rc = mosquitto_reconnect_async(g_bmw);
+                    g_last_connect_attempt = time(nullptr); // aktiv setzen, nicht nur via Log
                     std::cout << "[bridge] reconnect_async after refresh rc=" << rc << "\n";
                 } else {
                     std::cout << "[bridge] skip reconnect due to backoff\n";
@@ -497,10 +515,13 @@ int main(){
 
         // CONNECT watchdog: CONNECT sent but no CONNACK in time
         long last_attempt = g_last_connect_attempt.load();
-        if (!g_connected && last_attempt && (now - last_attempt) > CONNECT_TIMEOUT) {
+        bool connect_hung = (last_attempt != 0) && ((now - last_attempt) > CONNECT_TIMEOUT);
+        if (connect_hung) {
             if (now < g_next_connect_after.load()) continue;
 
-            std::cerr << "[bridge] CONNECT timed out -> full mosquitto client rebuild\n";
+            std::cerr << "[bridge] CONNECT timed out or handshake failed -> full mosquitto client rebuild\n";
+            g_connected = false;
+            publish_status(false);
 
             if (g_bmw) {
                 mosquitto_loop_stop(g_bmw, true);
