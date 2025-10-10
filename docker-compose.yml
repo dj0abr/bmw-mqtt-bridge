@@ -3,7 +3,7 @@ services:
     build: .
     env_file: ".env"
     volumes:
-      - ./data:/app/tokens
+      - bmw-tokens:/app/tokens
     restart: unless-stopped
 
 volumes:

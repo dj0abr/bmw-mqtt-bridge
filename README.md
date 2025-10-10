@@ -139,12 +139,12 @@ nano .env
 
 1. Build container image:
 ```bash
-docker-compose build
+docker compose build
 ```
 
 2. Perform BMW authentication:
 ```bash
-docker-compose run --rm bmw-bridge ./bmw_flow.sh
+docker compose run --rm bmw-bridge ./bmw_flow.sh
 ```
    - Open the displayed URL in your browser
    - Log in with your BMW account
@@ -152,7 +152,7 @@ docker-compose run --rm bmw-bridge ./bmw_flow.sh
 
 3. Start bridge:
 ```bash
-docker-compose up -d
+docker compose up -d
 ```
 
 ---
