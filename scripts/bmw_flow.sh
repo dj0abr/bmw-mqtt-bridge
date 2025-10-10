@@ -63,10 +63,11 @@
 set -euo pipefail
 
 # ---------- Configuration (can be overridden via env) ----------
-CLIENT_ID="12345678-abcd-ef12-3456-789012345678"
+: "${CLIENT_ID:=12345678-abcd-ef12-3456-789012345678}"  # Use default only if CLIENT_ID is unset or empty
 DEVICE_ENDPOINT="https://customer.bmwgroup.com/gcdm/oauth/device/code"
 TOKEN_ENDPOINT="https://customer.bmwgroup.com/gcdm/oauth/token"
 SCOPES="authenticate_user openid cardata:streaming:read"
+: "${OUT_DIR:="$."}"  # Use default only if OUT_DIR is unset or empty
 
 # ---------- Pre-flight checks ----------
 need() { command -v "$1" >/dev/null 2>&1 || { echo "✖ Missing dependency: $1" >&2; exit 1; }; }
@@ -80,6 +81,9 @@ fi
 
 # ensure we don't clobber world-readable files
 umask 077
+
+
+mkdir -p "$OUT_DIR"
 
 # ---------- PKCE (per run) ----------
 # Create a URL-safe code_verifier (<= 128 chars) and its S256 code_challenge
@@ -142,9 +146,9 @@ while (( LEFT > 0 )); do
     echo "$TOK" | jq '{access_token: .access_token|type, id_token: (.id_token|type), refresh_token: (.refresh_token|type), expires_in}'
 
     # write tokens (600 due to umask)
-    jq -r '.access_token'  <<<"$TOK" > access_token.txt
-    jq -r '.id_token'      <<<"$TOK" > id_token.txt
-    jq -r '.refresh_token' <<<"$TOK" > refresh_token.txt
+    jq -r '.access_token'  <<<"$TOK" > $OUT_DIR/access_token.txt
+    jq -r '.id_token'      <<<"$TOK" > $OUT_DIR/id_token.txt
+    jq -r '.refresh_token' <<<"$TOK" > $OUT_DIR/refresh_token.txt
 
     echo "Saved: access_token.txt, id_token.txt, refresh_token.txt"
     echo "→ MQTT password = contents of id_token.txt"

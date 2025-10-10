@@ -1,0 +1,10 @@
+services:
+  bmw-bridge:
+    build: .
+    env_file: ".env"
+    volumes:
+      - ./data:/app/tokens
+    restart: unless-stopped
+
+volumes:
+  bmw-tokens:

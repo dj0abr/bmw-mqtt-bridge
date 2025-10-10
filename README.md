@@ -116,6 +116,47 @@ you will need to log in again manually by running:
 
 ---
 
+## 🐳 Docker
+
+### Prerequisites
+
+1. Clone repository and change directory:
+```bash
+git clone https://github.com/dj0abr/bmw-mqtt-bridge.git
+cd bmw-mqtt-bridge
+```
+
+2. Configure environment variables:
+```bash
+# Create .env file from example
+cp .env.example .env
+
+# Edit .env file with your values
+nano .env
+```
+
+### Build and Run Container
+
+1. Build container image:
+```bash
+docker-compose build
+```
+
+2. Perform BMW authentication:
+```bash
+docker-compose run --rm bmw-bridge ./bmw_flow.sh
+```
+   - Open the displayed URL in your browser
+   - Log in with your BMW account
+   - Return to terminal and press ENTER
+
+3. Start bridge:
+```bash
+docker-compose up -d
+```
+
+---
+
 ## 📝 Notes
 
 - Your **local MQTT server** must run on the **same PC** as this program.  
@@ -150,4 +191,4 @@ licensed under the MIT License.
 ## ☕ Credits
 
 Developed by **Kurt**  
-Contributions, pull requests, and improvements are welcome!  
+Contributions, pull requests, and improvements are welcome!

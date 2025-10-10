@@ -43,16 +43,16 @@
 //       $(pkg-config --cflags --libs libmosquitto) -lcurl
 //
 // Runtime configuration (env overrides):
-//   CLIENT_ID        : BMW CarData client ID (GUID)              (default: placeholder)
-//   GCID             : BMW GCID / username for the MQTT broker   (default: placeholder)
-//   BMW_HOST         : customer.streaming-cardata.bmwgroup.com   (default: set)
-//   BMW_PORT         : 9000                                      (default: 9000)
-//   LOCAL_HOST       : 127.0.0.1                                 (default: 127.0.0.1)
-//   LOCAL_PORT       : 1883                                      (default: 1883)
-//   LOCAL_PREFIX     : bmw/                                      (default: bmw/)
-//   ID_TOKEN_FILE    : ./id_token.txt                            (default: ./id_token.txt)
-//   REFRESH_FILE     : ./refresh_token.txt                       (default: ./refresh_token.txt)
-//   REFRESH_SCRIPT   : ./bmw_refresh.sh                          (default: ./bmw_refresh.sh)
+//   CLIENT_ID          : BMW CarData client ID (GUID)              (default: placeholder)
+//   GCID               : BMW GCID / username for the MQTT broker   (default: placeholder)
+//   BMW_HOST           : customer.streaming-cardata.bmwgroup.com   (default: set)
+//   BMW_PORT           : 9000                                      (default: 9000)
+//   LOCAL_HOST         : 127.0.0.1                                 (default: 127.0.0.1)
+//   LOCAL_PORT         : 1883                                      (default: 1883)
+//   LOCAL_PREFIX       : bmw/                                      (default: bmw/)
+//   ID_TOKEN_FILE      : ./id_token.txt                            (default: ./id_token.txt)
+//   REFRESH_TOKEN_FILE : ./refresh_token.txt                       (default: ./refresh_token.txt)
+//   REFRESH_SCRIPT     : ./bmw_refresh.sh                          (default: ./bmw_refresh.sh)
 //
 // Notes:
 //   - id_token (a JWT) is used as the MQTT password; we parse its 'exp' to know validity.
@@ -108,10 +108,12 @@ static int         BMW_PORT    = env_int("BMW_PORT",   9000);
 static std::string LOCAL_HOST  = env_str("LOCAL_HOST", "127.0.0.1");
 static int         LOCAL_PORT  = env_int("LOCAL_PORT", 1883);
 static std::string LOCAL_PREFIX= env_str("LOCAL_PREFIX", "bmw/");
+static std::string LOCAL_USER  = env_str("LOCAL_USER", "");
+static std::string LOCAL_PASSWORD = env_str("LOCAL_PASSWORD", "");
 
 // Token files from your flow/refresh scripts:
 static std::string ID_TOKEN_FILE = env_str("ID_TOKEN_FILE", "./id_token.txt");
-static std::string REFRESH_FILE  = env_str("REFRESH_FILE",  "./refresh_token.txt");
+static std::string REFRESH_TOKEN_FILE  = env_str("REFRESH_TOKEN_FILE",  "./refresh_token.txt");
 
 // Path to refresh script
 static std::string REFRESH_SCRIPT = env_str("REFRESH_SCRIPT", "./bmw_refresh.sh");
@@ -233,7 +235,7 @@ static bool refresh_tokens() {
 
     // read new tokens
     std::string new_id = trim(read_file(ID_TOKEN_FILE));
-    std::string new_rt = trim(read_file(REFRESH_FILE));
+    std::string new_rt = trim(read_file(REFRESH_TOKEN_FILE));
     if (new_id.empty() || new_rt.empty()) {
         std::cerr << "[bridge] refresh: token files empty after script\n";
         return false;
@@ -389,7 +391,7 @@ int main(){
 
     // initial tokens
     g_id_token = trim(read_file(ID_TOKEN_FILE));
-    g_refresh_token = trim(read_file(REFRESH_FILE));
+    g_refresh_token = trim(read_file(REFRESH_TOKEN_FILE));
     if(g_id_token.empty() || g_refresh_token.empty()){
         std::cerr << "✖ id_token.txt or refresh_token.txt missing/empty.\n";
         return 1;
@@ -414,6 +416,11 @@ int main(){
     mosquitto_reconnect_delay_set(g_local, 1, 10, true);
     const char* lwt = "{\"connected\":false}";
     mosquitto_will_set(g_local, "bmw/status", strlen(lwt), lwt, 0, true);
+
+    // Set credentials if provided
+    if (!LOCAL_USER.empty() && !LOCAL_PASSWORD.empty()) {
+        mosquitto_username_pw_set(g_local, LOCAL_USER.c_str(), LOCAL_PASSWORD.c_str());
+    }
 
     if(mosquitto_connect(g_local, LOCAL_HOST.c_str(), LOCAL_PORT, 30) != MOSQ_ERR_SUCCESS){
         std::cerr << "connect local failed\n"; return 3;
