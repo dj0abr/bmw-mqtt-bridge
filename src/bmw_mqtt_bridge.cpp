@@ -336,13 +336,12 @@ static void on_bmw_disconnect_v5(struct mosquitto*, void*, int rc,
 }
 
 static void on_bmw_message(struct mosquitto*, void*, const struct mosquitto_message* m){
+    // Original topic in format GCID/<VIN>/....
     std::string in_topic = m->topic ? m->topic : "";
 
-    // BMW topic: GCID/<VIN>/...
+    // Republishing the exact message in ..../raw/<VIN>/....
     auto pos = in_topic.find('/');
-    std::string out_topic = LOCAL_PREFIX + (pos!=std::string::npos ? in_topic.substr(pos+1) : in_topic);
-    if (out_topic == LOCAL_PREFIX) out_topic += "raw"; // guard
-
+    std::string out_topic = LOCAL_PREFIX + "raw" + (pos!=std::string::npos ? in_topic.substr(pos) : "");
     int rc = mosquitto_publish(g_local, nullptr, out_topic.c_str(), m->payloadlen, m->payload, 0, false);
 
     std::cerr << "[bridge] fwd rc=" << rc
@@ -352,6 +351,83 @@ static void on_bmw_message(struct mosquitto*, void*, const struct mosquitto_mess
               << " qos="   << (m ? m->qos : -1)
               << " retain="<< (m ? (int)m->retain : -1)
               << "\n";
+
+    // Parsing the message payload and publishing in dedicated appropiate topic
+    try {
+        // Parse incoming JSON payload
+        std::string payload_str(static_cast<char*>(m->payload), m->payloadlen);
+        auto j = json::parse(payload_str);
+
+        // Extract VIN from payload or topic
+        std::string vin;
+
+        // VIN from payload
+        if (j.contains("vin") && j["vin"].is_string()) {
+            vin = j["vin"].get<std::string>();
+        }
+
+        // Fallback: VIN from topic (GCID/<VIN>/...)
+        if (vin.empty()) {
+            auto pos = in_topic.find('/');
+            if (pos != std::string::npos) {
+                auto next = in_topic.find('/', pos+1);
+
+                if (next != std::string::npos) {
+                    vin = in_topic.substr(pos+1, next - (pos+1));
+                } 
+                else {
+                    // Take everything from pos+1 to the end
+                    vin = in_topic.substr(pos+1);
+                }
+
+                if (vin.size() != 17) {
+                    throw std::runtime_error("Invalid VIN length extracted from topic: " + vin);
+                }
+            }
+        }
+
+        if (vin.empty()) {
+            throw std::runtime_error("VIN not found in payload or topic");
+        }
+
+        if (j.contains("data") && j["data"].is_object()) {
+            for (auto& [propName, propObj] : j["data"].items()) {
+                if (propObj.contains("value")) {
+                    // Extend topic with propertyName
+                    std::string prop_topic = LOCAL_PREFIX + "vehicles/" + vin + "/" + propName;
+
+                    // Dump the entire object { value, timestamp, unit }
+                    // .dump() ensures correct stringification (works for numbers, strings, etc.)
+                    std::string value_str = propObj.dump(); 
+
+                    int rc = mosquitto_publish(
+                        g_local,
+                        nullptr,
+                        prop_topic.c_str(),
+                        value_str.size(),
+                        value_str.data(),
+                        0,
+                        false
+                    );
+
+                    std::cerr << "[bridge] fwd rc=" << rc
+                              << " in='"  << in_topic
+                              << "' out='"<< prop_topic
+                              << "' value="<< value_str
+                              << " bytes="<< value_str.size()
+                              << " qos="   << (m ? m->qos : -1)
+                              << " retain="<< (m ? (int)m->retain : -1)
+                              << "\n";
+                }
+            }
+        }
+        else {
+            throw std::runtime_error("No valid data in payloyad " + payload_str);
+        }
+    } 
+    catch (const std::exception& e) {
+        std::cerr << "[bridge] JSON parse error: " << e.what() << "\n";
+    }
 }
 
 // log callback: set g_last_connect_attempt when "sending CONNECT" appears; filter ping spam
@@ -444,6 +520,11 @@ int main(){
     // fixed token files (no env overrides)
     ID_TOKEN_FILE       = (std::filesystem::path(TDIR) / "id_token.txt").string();
     REFRESH_TOKEN_FILE  = (std::filesystem::path(TDIR) / "refresh_token.txt").string();
+
+    // Ensure LOCAL_PREFIX ends with '/'
+    if (!LOCAL_PREFIX.empty() && LOCAL_PREFIX.back() != '/') {
+        LOCAL_PREFIX.push_back('/');
+    }
 
     // ensure token directory exists
     if (!std::filesystem::exists(TDIR)) {
