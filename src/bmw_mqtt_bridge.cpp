@@ -526,11 +526,6 @@ int main(){
     std::cerr << "[bridge] MQTT retain for republished topics: "
               << (MQTT_RETAIN ? "ENABLED" : "disabled") << "\n";
 
-    // Ensure LOCAL_PREFIX ends with '/'
-    if (!LOCAL_PREFIX.empty() && LOCAL_PREFIX.back() != '/') {
-        LOCAL_PREFIX.push_back('/');
-    }
-
     // ensure token directory exists
     if (!std::filesystem::exists(TDIR)) {
         std::cerr << "✖ Token directory missing: " << TDIR << "\n"
