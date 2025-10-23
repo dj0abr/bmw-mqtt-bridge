@@ -14,9 +14,6 @@ so host and container share the same configuration and tokens.
 You can freely switch between **Docker** and the **classic bare-metal** version without re-authenticating.
 
 ```bash
-# Build container
-docker compose build --no-cache
-
 # Authenticate with BMW (creates .env automatically)
 docker compose run --rm -it bmw-bridge ./bmw_flow.sh
 ```

@@ -1,6 +1,6 @@
 services:
   bmw-bridge:
-    build: .
+    image: ghcr.io/dj0abr/bmw-mqtt-bridge:latest
     environment:
       - XDG_STATE_HOME=/app/state          # Parent; Bridge nutzt /app/state/bmw-mqtt-bridge
       - LOCAL_HOST=host.docker.internal    # MQTT läuft i.d.R. auf dem Host
