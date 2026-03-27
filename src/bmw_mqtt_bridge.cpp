@@ -608,7 +608,18 @@ int main(){
     mosquitto_lib_init();
 
     // local broker
-    g_local = mosquitto_new("bmw-local-forwarder", true, nullptr);
+    std::string local_client_id = env_str("LOCAL_CLIENT_ID", "");
+    if (local_client_id.empty()) {
+        // derive from LOCAL_PREFIX so it's unique without extra config
+        local_client_id = "bmw-bridge-" + LOCAL_PREFIX;
+        // sanitize: remove trailing slash and replace / with -
+        while (!local_client_id.empty() && local_client_id.back() == '/')
+            local_client_id.pop_back();
+        std::replace(local_client_id.begin(), local_client_id.end(), '/', '-');
+    }
+    g_local = mosquitto_new(local_client_id.c_str(), true, nullptr);
+    std::cerr << "[bridge] local MQTT client_id: " << local_client_id << "\n";
+    
     if(!g_local){ std::cerr << "mosquitto_new local failed\n"; return 2; }
 
     mosquitto_reconnect_delay_set(g_local, 1, 10, true);
