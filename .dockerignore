@@ -1,0 +1,11 @@
+# Send only the sources and scripts needed to build the image.
+*
+!Dockerfile
+!.dockerignore
+!src/
+!src/*.cpp
+!src/*.hpp
+!scripts/
+!scripts/compile.sh
+!scripts/bmw_flow.sh
+!scripts/docker-entrypoint.sh

@@ -1,4 +1,4 @@
-# Offline authentication regression tests
+# Offline regression tests
 
 From the repository root:
 
@@ -18,3 +18,5 @@ Coverage includes HTTP/network errors, gateway `fault` objects, incomplete JSON,
 wrong types, `null` tokens, malformed/expired JWTs, successful token rotation,
 PKCE request parameters, OAuth polling and `slow_down`, owner-only permissions,
 redacted diagnostics, and preservation of existing credentials on bad responses.
+The build-script tests also check that compiler and pkg-config failures return
+nonzero exit codes, and that compiler/linker flags are passed separately.
