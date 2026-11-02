@@ -77,7 +77,9 @@ jobs:
           TEST_PLATFORM: ${{ matrix.platform }}
         run: |
           docker run --rm --platform "$TEST_PLATFORM" bmw-mqtt-bridge:test bash -ec '
-            command -v curl jq openssl nano >/dev/null
+            for dependency in curl jq openssl nano; do
+              command -v "$dependency" >/dev/null
+            done
             bash -n /app/bmw_flow.sh /app/docker-entrypoint.sh
           '
           set +e
