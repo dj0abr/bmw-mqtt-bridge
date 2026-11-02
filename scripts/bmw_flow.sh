@@ -47,7 +47,7 @@
 #   - Enter your real CLIENT_ID and GCID, save, exit the editor,
 #     and then rerun the script.
 #
-# Outputs (stored in ~/.local/state/bmw-mqtt-bridge, permissions 644):
+# Outputs (stored in ~/.local/state/bmw-mqtt-bridge, permissions 600):
 #   access_token.txt
 #   id_token.txt
 #   refresh_token.txt
@@ -59,12 +59,13 @@
 #   - id_token is a JWT that contains the 'exp' claim used by the bridge.
 #
 # Security:
-#   - Files are written with safe permissions (rw-r--r--).
+#   - Files are written with owner-only permissions (rw-------).
 #   - Do NOT commit real tokens/IDs to Git repositories.
 # -----------------------------------------------------------------------------
 
 
 set -euo pipefail
+umask 077
 
 # ---------- Fixed locations (no path overrides) ----------
 STATE_BASE="${XDG_STATE_HOME:-$HOME/.local/state}"
@@ -72,7 +73,7 @@ OUT_DIR="$STATE_BASE/bmw-mqtt-bridge"
 ENV_FILE="$OUT_DIR/.env"
 
 # Ensure token dir exists
-mkdir -p "$OUT_DIR"
+mkdir -p -m 700 "$OUT_DIR"
 
 # ---------- Bootstrap .env if missing ----------
 if [[ ! -f "$ENV_FILE" ]]; then
@@ -145,11 +146,40 @@ need curl
 need jq
 need openssl
 
-# We want token files to be world-readable enough for common service setups (owner RW, group/other R).
-umask 022
+# Keep HTTP responses and staged tokens private, and remove them on every exit.
+AUTH_TMP_DIR="$(mktemp -d "$OUT_DIR/.auth.XXXXXX")"
+trap 'rm -rf -- "$AUTH_TMP_DIR"' EXIT
+RESPONSE_FILE="$AUTH_TMP_DIR/response.json"
+HTTP_CODE=""
 
-# ---------- PKCE (per run) ----------
-CODE_VERIFIER="$(openssl rand -base64 96 | tr -d '=+/ ' | cut -c1-96)"
+request_json() {
+  if ! HTTP_CODE="$(curl -sS --connect-timeout 10 --max-time 20 \
+    --output "$RESPONSE_FILE" --write-out '%{http_code}' "$@")"; then
+    echo "✖ BMW request failed (network/TLS/timeout). Existing tokens were not changed." >&2
+    return 1
+  fi
+  if [[ ! "$HTTP_CODE" =~ ^[0-9]{3}$ ]] || \
+     ! jq -e 'type == "object"' "$RESPONSE_FILE" >/dev/null 2>&1; then
+    echo "✖ BMW returned an invalid JSON response (HTTP $HTTP_CODE). Existing tokens were not changed." >&2
+    return 1
+  fi
+}
+
+# Extract only a bounded error code; raw responses may contain credentials.
+error_code() {
+  jq -r 'try ((.error // .fault.detail.errorcode // "") |
+    if type == "string" and test("^[A-Za-z0-9_.-]{1,128}$") then . else "" end) catch ""' \
+    "$RESPONSE_FILE"
+}
+
+report_error() {
+  local code
+  code="$(error_code)"
+  echo "✖ $1 (HTTP $HTTP_CODE${code:+, $code}). Existing tokens were not changed." >&2
+}
+
+# ---------- PKCE (per run): 96 unreserved characters, without line breaks ----------
+CODE_VERIFIER="$(openssl rand -hex 48)"
 CODE_CHALLENGE="$(printf '%s' "$CODE_VERIFIER" \
   | openssl dgst -sha256 -binary \
   | openssl base64 -A \
@@ -157,28 +187,43 @@ CODE_CHALLENGE="$(printf '%s' "$CODE_VERIFIER" \
   | tr -d '=')"
 
 echo "1) Requesting device code…"
-RESP="$(curl -sS \
+request_json \
   -H "Accept: application/json" \
   -H "Content-Type: application/x-www-form-urlencoded" \
   --data-urlencode client_id="$CLIENT_ID" \
+  --data-urlencode response_type="device_code" \
   --data-urlencode scope="$SCOPES" \
   --data-urlencode code_challenge="$CODE_CHALLENGE" \
   --data-urlencode code_challenge_method="S256" \
-  "$DEVICE_ENDPOINT")"
+  "$DEVICE_ENDPOINT"
 
-DEVICE_CODE="$(jq -r '.device_code // empty' <<<"$RESP")"
-VERIFY_URL="$(jq -r '.verification_uri_complete // (.verification_uri + "?user_code=" + .user_code)' <<<"$RESP")"
-INTERVAL="$(jq -r '.interval // 5' <<<"$RESP")"
-EXPIRES_IN="$(jq -r '.expires_in // 300' <<<"$RESP")"
-
-if [[ -z "$DEVICE_CODE" || -z "$VERIFY_URL" ]]; then
-  echo "✖ Failed to obtain device_code. Raw response:" >&2
-  echo "$RESP" | jq . >&2 || echo "$RESP" >&2
+if [[ "$HTTP_CODE" != 200 ]] || ! jq -e '
+  def positive_integer: type == "number" and . == floor and . > 0 and . < 2147483647;
+  (.error == null) and (.fault == null) and
+  (.device_code | type == "string" and length > 0 and . != "null") and
+  ((if .interval == null then 5 else .interval end) | positive_integer) and
+  (.expires_in | positive_integer)
+' "$RESPONSE_FILE" >/dev/null 2>&1; then
+  report_error "Failed to obtain a valid device code"
   exit 1
 fi
 
-echo "   Device code received:"
-echo "$RESP" | jq '{device_code, user_code, verification_uri, verification_uri_complete, interval, expires_in}'
+DEVICE_CODE="$(jq -r '.device_code' "$RESPONSE_FILE")"
+VERIFY_URL="$(jq -r '
+  if (.verification_uri_complete | type == "string" and length > 0) then
+    .verification_uri_complete
+  elif (.verification_uri | type == "string" and length > 0) and
+       (.user_code | type == "string" and length > 0) then
+    .verification_uri + "?user_code=" + (.user_code | @uri)
+  else "" end' "$RESPONSE_FILE")"
+if [[ "$VERIFY_URL" != https://* ]]; then
+  report_error "Missing or invalid verification URL"
+  exit 1
+fi
+INTERVAL="$(jq -r '.interval // 5' "$RESPONSE_FILE")"
+EXPIRES_IN="$(jq -r '.expires_in' "$RESPONSE_FILE")"
+# Include browser authorization and HTTP request time in the device-code lifetime.
+DEADLINE=$((SECONDS + EXPIRES_IN))
 
 echo
 echo "2) Open the following URL in your browser and complete login/consent:"
@@ -189,65 +234,78 @@ read -r -p "Press Enter once you see 'Anmeldung erfolgreich / Login successful'�
 trap - INT
 
 echo
-echo "3) Polling token endpoint every ${INTERVAL}s (timeout ~${EXPIRES_IN}s)…"
-LEFT="$EXPIRES_IN"
+echo "3) Polling token endpoint every ${INTERVAL}s…"
 
-while (( LEFT > 0 )); do
-  TOK="$(curl -sS \
+while (( SECONDS < DEADLINE )); do
+  request_json \
     -H "Content-Type: application/x-www-form-urlencoded" \
     --data-urlencode grant_type="urn:ietf:params:oauth:grant-type:device_code" \
     --data-urlencode device_code="$DEVICE_CODE" \
     --data-urlencode client_id="$CLIENT_ID" \
     --data-urlencode code_verifier="$CODE_VERIFIER" \
-    "$TOKEN_ENDPOINT")"
+    "$TOKEN_ENDPOINT"
 
-  ERR="$(jq -r '.error // empty' <<<"$TOK")"
-
-  if [[ -z "$ERR" ]]; then
-    echo
-    echo "✔ Tokens received:"
-    echo "$TOK" | jq '{access_token: .access_token|type, id_token: (.id_token|type), refresh_token: (.refresh_token|type), expires_in}'
-
-    # Write tokens into fixed OUT_DIR (permissions end up 0644 due to umask 022)
-    jq -r '.access_token'  <<<"$TOK" > "$OUT_DIR/access_token.txt"
-    jq -r '.id_token'      <<<"$TOK" > "$OUT_DIR/id_token.txt"
-    jq -r '.refresh_token' <<<"$TOK" > "$OUT_DIR/refresh_token.txt"
-    chmod 0644 "$OUT_DIR"/{access_token.txt,id_token.txt,refresh_token.txt} || true
-
-    echo "Saved tokens in: $OUT_DIR"
-    echo "→ MQTT password = contents of $OUT_DIR/id_token.txt"
-    exit 0
-  else
-    DESC="$(jq -r '.error_description // ""' <<<"$TOK")"
-    case "$ERR" in
-      authorization_pending)
-        printf "…waiting for user confirmation (remaining ~%ss)\r" "$LEFT"
-        ;;
-      slow_down)
-        INTERVAL=$((INTERVAL+5))
-        printf "Server says 'slow_down' → new interval %ss (remaining ~%ss)\r" "$INTERVAL" "$LEFT"
-        ;;
-      access_denied)
-        printf "\n✖ Access denied in browser. %s\n" "$DESC" >&2
-        exit 1
-        ;;
-      expired_token|expired_device_code|invalid_grant)
-        printf "\n✖ Device code expired/invalid. %s\n" "$DESC" >&2
-        echo "Hint: CODE_VERIFIER must match the device-code run." >&2
-        exit 1
-        ;;
-      *)
-        printf "\n✖ Unexpected error: %s (%s)\n" "$ERR" "$DESC" >&2
-        echo "$TOK" | jq . >&2 || true
-        exit 1
-        ;;
-    esac
+  ERR="$(error_code)"
+  if [[ "$ERR" == authorization_pending || "$ERR" == slow_down ]]; then
+    if [[ "$HTTP_CODE" != 200 && "$HTTP_CODE" != 400 ]]; then
+      report_error "Token endpoint rejected the request"
+      exit 1
+    fi
+    if [[ "$ERR" == slow_down ]]; then
+      INTERVAL=$((INTERVAL+5))
+      echo "Server says 'slow_down' → new interval ${INTERVAL}s"
+    fi
+    LEFT=$((DEADLINE-SECONDS))
+    if (( LEFT <= 0 )); then break; fi
+    WAIT="$INTERVAL"
+    if (( WAIT > LEFT )); then WAIT="$LEFT"; fi
+    printf '…waiting for user confirmation (remaining ~%ss)\n' "$LEFT"
+    sleep "$WAIT"
+    continue
   fi
 
-  sleep "$INTERVAL"
-  LEFT=$((LEFT-INTERVAL))
+  if [[ "$HTTP_CODE" != 200 ]] || ! jq -e '
+    def token: type == "string" and length > 0 and . != "null" and (test("\\s") | not);
+    (.error == null) and (.fault == null) and
+    (.access_token | token) and (.id_token | token) and (.refresh_token | token) and
+    (.expires_in | type == "number" and . == floor and . > 0) and
+    (.id_token | test("^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$"))
+  ' "$RESPONSE_FILE" >/dev/null 2>&1; then
+    report_error "Token response is incomplete, invalid, or contains an OAuth/gateway error"
+    if [[ "$ERR" == invalid_grant || "$ERR" == access_denied || "$ERR" == expired_token || "$ERR" == expired_device_code ]]; then
+      echo "Please restart this script and complete a new browser authorization." >&2
+    fi
+    exit 1
+  fi
+
+  if ! TOKEN_EXP="$(jq -er --argjson now "$(date +%s)" '
+    .id_token | split(".")[1] | gsub("-"; "+") | gsub("_"; "/") |
+    @base64d | fromjson | .exp |
+    select(type == "number" and . == floor and . > $now)
+  ' "$RESPONSE_FILE" 2>/dev/null)"; then
+    report_error "ID token has no valid future expiry"
+    exit 1
+  fi
+
+  # Stage the entire validated response before replacing any token. Each mv is
+  # atomic on this filesystem. Save the rotated refresh token first for recovery.
+  for name in access_token id_token refresh_token; do
+    jq -er --arg name "$name" '.[$name]' "$RESPONSE_FILE" > "$AUTH_TMP_DIR/$name.txt"
+    chmod 0600 "$AUTH_TMP_DIR/$name.txt"
+  done
+  for name in refresh_token id_token access_token; do
+    if ! mv -fT -- "$AUTH_TMP_DIR/$name.txt" "$OUT_DIR/$name.txt"; then
+      echo "✖ Could not save $name.txt. Check permissions in $OUT_DIR." >&2
+      exit 1
+    fi
+  done
+
+  echo
+  echo "✔ Tokens validated and saved in: $OUT_DIR (permissions 0600)"
+  echo "   ID token expires at Unix timestamp $TOKEN_EXP"
+  exit 0
 done
 
 echo
-echo "✖ Timed out waiting for user confirmation." >&2
+echo "✖ Device code expired. Restart this script to obtain a new code; existing tokens were not changed." >&2
 exit 1

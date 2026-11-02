@@ -1,0 +1,5 @@
+# Local source build; combine with docker-compose.yml using both -f arguments.
+services:
+  bmw-bridge:
+    image: bmw-mqtt-bridge:local
+    build: .
