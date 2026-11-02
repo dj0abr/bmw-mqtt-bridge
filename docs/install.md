@@ -32,6 +32,8 @@ If this is your first run, the script will:
 - open nano with a new .env file  
 → insert your CLIENT_ID and GCID there, then save and exit.
 
+Run `./scripts/bmw_flow.sh` again after saving the initial configuration.
+
 After that, open the displayed URL in your browser, log in,  
 then return to the terminal and press ENTER.
 

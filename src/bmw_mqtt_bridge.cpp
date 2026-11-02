@@ -64,7 +64,7 @@
 //
 // Notes:
 //   - id_token (a JWT) is used as the MQTT password; we parse its 'exp' to know validity.
-//   - Files written by this program use permissions 0644.
+//   - Token files and refresh diagnostics use permissions 0600.
 //
 // ------------------------------------------------------------------------
 
@@ -89,6 +89,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <regex>
+#include <limits>
 
 #ifndef NLOHMANN_JSON_HPP
   #include "json.hpp" // nlohmann/json header (json.hpp next to this file)
@@ -270,6 +271,11 @@ static std::string trim(std::string s) {
     return s.substr(i);
 }
 
+static bool valid_token_string(const std::string& token) {
+    return !token.empty() && token != "null" &&
+           token.find_first_of(" \t\r\n\f\v") == std::string::npos;
+}
+
 static bool write_file(const std::string& path, const std::string& data) {
     std::ofstream f(path, std::ios::trunc);
     if (!f) return false;
@@ -322,10 +328,45 @@ static long jwt_exp_unix(const std::string& jwt){
     // JWT: header.payload.sig  → we want the payload part
     auto p1 = jwt.find('.'); if(p1==std::string::npos) return 0;
     auto p2 = jwt.find('.', p1+1); if(p2==std::string::npos) return 0;
+    if (p1 == 0 || p2 == p1+1 || p2+1 == jwt.size() ||
+        jwt.find('.', p2+1) != std::string::npos) return 0;
+    if (!std::all_of(jwt.begin(), jwt.end(), [](unsigned char c){
+        return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+               (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.';
+    })) return 0;
     auto payload = base64url_decode(jwt.substr(p1+1, p2-(p1+1)));
     json j = json::parse(payload, nullptr, false);
-    if(j.is_discarded()) return 0;
-    return j.value("exp", 0L);
+    if (!j.is_object() || !j.contains("exp") || !j["exp"].is_number_integer()) return 0;
+    const auto& exp = j["exp"];
+    if (exp.is_number_unsigned()) {
+        auto value = exp.get<unsigned long long>();
+        return value <= static_cast<unsigned long long>(std::numeric_limits<long>::max())
+            ? static_cast<long>(value) : 0;
+    }
+    auto value = exp.get<long long>();
+    return value > 0 && value <= std::numeric_limits<long>::max()
+        ? static_cast<long>(value) : 0;
+}
+
+// Only log bounded error codes, never raw responses containing credentials.
+static std::string oauth_error_code(const json& response) {
+    if (!response.is_object()) return {};
+    std::string code;
+    if (response.contains("error") && response["error"].is_string()) {
+        code = response["error"].get<std::string>();
+    } else if (response.contains("fault") && response["fault"].is_object()) {
+        const auto& fault = response["fault"];
+        if (fault.contains("detail") && fault["detail"].is_object()) {
+            const auto& detail = fault["detail"];
+            if (detail.contains("errorcode") && detail["errorcode"].is_string())
+                code = detail["errorcode"].get<std::string>();
+        }
+    }
+    if (code.size() > 128 || !std::all_of(code.begin(), code.end(), [](unsigned char c){
+        return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+               (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
+    })) return "unrecognized_error";
+    return code;
 }
 
 static size_t curl_write_cb(void* ptr, size_t size, size_t nmemb, void* userdata){
@@ -587,16 +628,23 @@ int main(){
     std::ios::sync_with_stdio(false);
     std::cout.setf(std::ios::unitbuf); // auto-flush stdout
 
+    // Refresh may be needed before creating either MQTT client.
+    if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK) {
+        std::cerr << "✖ curl initialization failed\n";
+        return 1;
+    }
+
     // initial tokens
     g_id_token = trim(read_file(ID_TOKEN_FILE));
     g_refresh_token = trim(read_file(REFRESH_TOKEN_FILE));
-    if(g_id_token.empty() || g_refresh_token.empty()){
-        std::cerr << "✖ id_token.txt or refresh_token.txt missing/empty in " << TDIR << "\n";
+    if (!valid_token_string(g_refresh_token)) {
+        std::cerr << "✖ refresh_token.txt missing or invalid in " << TDIR << "\n"
+                  << "   Run scripts/bmw_flow.sh again, then restart the bridge.\n";
         return 1;
     }
     g_id_token_exp = jwt_exp_unix(g_id_token);
-    if (g_id_token_exp.load() == 0) {
-        std::cerr << "✖ invalid id_token (no exp) → trying refresh\n";
+    if (g_id_token_exp.load() <= time(nullptr)) {
+        std::cerr << "[bridge] id_token missing, invalid or expired → trying refresh\n";
         if (!refresh_tokens()) {
             std::cerr << "✖ cannot obtain valid token, exiting\n";
             return 1;
@@ -604,7 +652,6 @@ int main(){
     }
 
     // libs init
-    curl_global_init(CURL_GLOBAL_DEFAULT);
     mosquitto_lib_init();
 
     // local broker
@@ -758,22 +805,6 @@ int main(){
 
 // ============= refresh tokens =============
 
-// small utility: safely writes a file (0644 default)
-static bool write_file_mode(const std::string& path, const std::string& data, mode_t mode=0644){
-    int fd = ::open(path.c_str(), O_CREAT|O_TRUNC|O_WRONLY, mode);
-    if (fd < 0) return false;
-    ssize_t want = (ssize_t)data.size();
-    const char* p = data.data();
-    while (want > 0){
-        ssize_t n = ::write(fd, p, want);
-        if (n <= 0) { ::close(fd); return false; }
-        want -= n; p += n;
-    }
-    ::fsync(fd);
-    ::close(fd);
-    return true;
-}
-
 // form-urlencode for a key/value with libcurl (uses its own CURL easy handle)
 static std::string urlencode_component(const std::string& s){
     CURL* h = curl_easy_init();
@@ -798,7 +829,7 @@ static std::string build_form_body(const std::vector<std::pair<std::string,std::
 
 static bool write_file_atomic(const std::string& final_path,
                               const std::string& data,
-                              mode_t mode = 0644)
+                              mode_t mode = 0600)
 {
     namespace fs = std::filesystem;
 
@@ -831,8 +862,8 @@ static bool write_file_atomic(const std::string& final_path,
     ssize_t left = (ssize_t)data.size();
     while (left > 0) {
         ssize_t n = ::write(tfd, p, left);
-        if (n < 0) {
-            if (errno == EINTR) continue;
+        if (n <= 0) {
+            if (n < 0 && errno == EINTR) continue;
             std::cerr << "[bridge] write failed: " << std::strerror(errno) << "\n";
             ::close(tfd);
             ::unlink(buf.data());
@@ -874,8 +905,9 @@ static bool refresh_tokens() {
 
     // load current refresh token (as in the script)
     std::string cur_refresh = trim(read_file(REFRESH_TOKEN_FILE));
-    if (cur_refresh.empty()) {
-        std::cerr << "[bridge] refresh: refresh_token.txt missing/empty\n";
+    if (!valid_token_string(cur_refresh)) {
+        std::cerr << "[bridge] refresh: refresh_token.txt missing or invalid. "
+                  << "Run scripts/bmw_flow.sh again, then restart the bridge.\n";
         return false;
     }
 
@@ -933,62 +965,66 @@ static bool refresh_tokens() {
     std::string dir      = dirname_of(id_path);
     std::string at_path  = (std::filesystem::path(dir) / "access_token.txt").string();
 
-    // save entire response (debug) in same directory as token files
-    try {
-        json dbg = json::parse(resp);
-        write_file_mode((std::filesystem::path(dir) / "token_refresh_response.json").string(),
-                        dbg.dump(2) + "\n", 0644);
-    } catch (...) {
-        write_file_mode((std::filesystem::path(dir) / "token_refresh_response.json").string(),
-                        resp, 0644);
-    }
+    json j = json::parse(resp, nullptr, false);
+    const std::string error_code = oauth_error_code(j);
+    const std::string diagnostic_path =
+        (std::filesystem::path(dir) / "token_refresh_response.json").string();
+    json diagnostic = {{"http_status", http_code}};
+    if (!error_code.empty()) diagnostic["error"] = error_code;
+    auto fail = [&](const char* reason) {
+        diagnostic["result"] = "error";
+        diagnostic["reason"] = reason;
+        write_file_atomic(diagnostic_path, diagnostic.dump(2) + "\n");
+        std::cerr << "✖ Refresh HTTP " << http_code << ": " << reason;
+        if (!error_code.empty()) std::cerr << " (" << error_code << ")";
+        std::cerr << "\n";
+        if (error_code == "invalid_grant" || error_code == "access_denied")
+            std::cerr << "   Run scripts/bmw_flow.sh again, then restart the bridge.\n";
+        return false;
+    };
 
     if (http_code != 200) {
-        std::cerr << "✖ Refresh HTTP " << http_code << ":\n" << resp << "\n";
-        return false;
+        return fail("BMW token endpoint rejected the request");
     }
 
-    // parse JSON & check error
-    json j = json::parse(resp, nullptr, false);
-    if (j.is_discarded()) {
-        std::cerr << "✖ Refresh: invalid JSON\n";
-        return false;
+    if (!j.is_object()) {
+        return fail("expected a JSON object");
     }
-    if (j.contains("error") && !j["error"].is_null()) {
-        std::cerr << "✖ Refresh failed:\n" << j.dump(2) << "\n";
-        return false;
+    if ((j.contains("error") && !j["error"].is_null()) ||
+        (j.contains("fault") && !j["fault"].is_null())) {
+        return fail("BMW returned an OAuth or gateway error");
     }
 
-    // extract tokens
-    std::string new_id  = j.value("id_token",      "");
-    std::string new_rt  = j.value("refresh_token", "");
-    std::string new_acc = j.value("access_token",  "");
-
-    // remove \r\n / trim
-    new_id  = trim(new_id);
-    new_rt  = trim(new_rt);
-    new_acc = trim(new_acc);
-
-    if (new_id.empty() || new_rt.empty() || new_acc.empty()) {
-        std::cerr << "✖ Refresh: missing data in response\n";
-        return false;
+    // Validate the complete response before replacing any existing token.
+    for (const char* key : {"id_token", "refresh_token", "access_token"}) {
+        if (!j.contains(key) || !j[key].is_string() ||
+            !valid_token_string(j[key].get<std::string>()))
+            return fail("missing or invalid token fields");
     }
+    if (!j.contains("expires_in") || !j["expires_in"].is_number_integer() || j["expires_in"] <= 0)
+        return fail("missing or invalid expires_in");
 
-    // --- Atomar direkt ins Zielverzeichnis schreiben (kein /tmp mehr) ---
-    bool ok = true;
-    ok &= write_file_atomic(id_path, new_id, 0644);
-    ok &= write_file_atomic(rt_path, new_rt, 0644);
-    ok &= write_file_atomic(at_path, new_acc, 0644);
+    const std::string new_id = j["id_token"].get<std::string>();
+    const std::string new_rt = j["refresh_token"].get<std::string>();
+    const std::string new_acc = j["access_token"].get<std::string>();
+    const long new_exp = jwt_exp_unix(new_id);
+    if (new_exp <= time(nullptr)) return fail("ID token has no valid future expiry");
 
-    if (!ok) {
-        std::cerr << "[bridge] writing tokens atomically failed\n";
-        return false;
-    }
+    // Each replacement is atomic. Persist the rotated refresh token first so
+    // recovery remains possible if writing a later file fails.
+    if (!write_file_atomic(rt_path, new_rt) ||
+        !write_file_atomic(id_path, new_id) ||
+        !write_file_atomic(at_path, new_acc))
+        return fail("could not save renewed tokens");
+
+    diagnostic["result"] = "ok";
+    diagnostic["id_token_expires_at"] = new_exp;
+    write_file_atomic(diagnostic_path, diagnostic.dump(2) + "\n");
 
     // update in-memory
     g_id_token      = new_id;
     g_refresh_token = new_rt;
-    g_id_token_exp  = jwt_exp_unix(g_id_token);
+    g_id_token_exp  = new_exp;
 
     std::cout << "✔ New Tokens saved:\n"
               << "   id_token.txt, refresh_token.txt, access_token.txt\n";
@@ -997,4 +1033,3 @@ static bool refresh_tokens() {
 
     return true;
 }
-
