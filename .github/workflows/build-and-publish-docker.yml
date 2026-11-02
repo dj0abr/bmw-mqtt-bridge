@@ -29,7 +29,7 @@ jobs:
       - name: Install test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y g++ pkg-config libmosquitto-dev libcurl4-openssl-dev jq openssl python3
+          sudo apt-get install -y g++ pkg-config libmosquitto-dev libcurl4-openssl-dev jq openssl python3 mosquitto
       - name: Compile and run offline tests
         run: |
           bash scripts/compile.sh

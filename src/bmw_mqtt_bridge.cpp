@@ -49,6 +49,7 @@
 //   BMW_PORT         : 9000                                      (default: 9000)
 //   LOCAL_HOST       : 127.0.0.1                                 (default: 127.0.0.1)
 //   LOCAL_PORT       : 1883                                      (default: 1883)
+//   LOCAL_CLIENT_ID  : (optional; default: bmw-bridge-<CLIENT_ID>)
 //   LOCAL_PREFIX     : bmw/                                      (default: bmw/)
 //   LOCAL_USER       : (optional)
 //   LOCAL_PASSWORD   : (optional)
@@ -655,7 +656,14 @@ int main(){
     mosquitto_lib_init();
 
     // local broker
-    g_local = mosquitto_new("bmw-local-forwarder", true, nullptr);
+    std::string local_client_id = env_str("LOCAL_CLIENT_ID", "");
+    if (local_client_id.empty()) {
+        // Keep separate BMW clients independent of their local topic prefixes.
+        local_client_id = "bmw-bridge-" + CLIENT_ID;
+    }
+    g_local = mosquitto_new(local_client_id.c_str(), true, nullptr);
+    std::cerr << "[bridge] local MQTT client_id: " << local_client_id << "\n";
+
     if(!g_local){ std::cerr << "mosquitto_new local failed\n"; return 2; }
 
     mosquitto_reconnect_delay_set(g_local, 1, 10, true);

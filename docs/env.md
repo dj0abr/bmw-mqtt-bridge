@@ -36,6 +36,7 @@ Validation on startup:
 |------------------|------|-------------|----------|-------------|
 | `LOCAL_HOST`     | str  | `127.0.0.1` | No       | Host/IP of your local MQTT broker. |
 | `LOCAL_PORT`     | int  | `1883`      | No       | Port of your local MQTT broker. |
+| `LOCAL_CLIENT_ID` | str | `bmw-bridge-<CLIENT_ID>` | No | MQTT client ID on the local broker. An empty value uses the default. Explicit overrides must be unique on that broker. Independent of `LOCAL_PREFIX`. |
 | `LOCAL_USER`     | str  | *(empty)*   | No       | Username for local broker authentication (optional). |
 | `LOCAL_PASSWORD` | str  | *(empty)*   | No       | Password for local broker authentication (optional). |
 
